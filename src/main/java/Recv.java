@@ -17,19 +17,22 @@ public class Recv {
         channel.queueDeclare(TASK_QUEUE_NAME, false, false, false, null);
         System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
 
+        channel.basicQos(1); // accept only one unack-ed message at a time (see below)
+
         DeliverCallback deliverCallback = (consumerTag, delivery) -> {
             String message = new String(delivery.getBody(), "UTF-8");
 
             System.out.println(" [x] Received '" + message + "'");
             try {
                 doWork(message);
-            } catch(Exception e) {
+            } catch (Exception e) {
                 System.out.println("It broke: " + e.getMessage());
             } finally {
                 System.out.println(" [x] Done");
+                channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
             }
         };
-        boolean autoAck = true; // acknowledgment is covered below
+        boolean autoAck = false;
         channel.basicConsume(TASK_QUEUE_NAME, autoAck, deliverCallback, consumerTag -> { });
     }
     private static void doWork(String task) throws InterruptedException {
