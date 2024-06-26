@@ -1,32 +1,66 @@
+import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
 
-public class Send {
+import java.io.IOException;
+import java.util.UUID;
+import java.util.concurrent.*;
 
-    private static final String EXCHANGE_NAME = "topic_logs";
+public class Send implements AutoCloseable {
 
-    public static void main(String[] argv) throws Exception {
+    private Connection connection;
+    private Channel channel;
+    private String requestQueueName = "rpc_queue";
+
+    public Send() throws IOException, TimeoutException {
         ConnectionFactory factory = new ConnectionFactory();
         factory.setHost("localhost");
-        try (Connection connection = factory.newConnection();
-             Channel channel = connection.createChannel()) {
 
-            channel.exchangeDeclare(EXCHANGE_NAME, "topic");
+        connection = factory.newConnection();
+        channel = connection.createChannel();
+    }
 
-            String routingKey = getRouting(argv);
-            String message = getMessage(argv);
-
-            channel.basicPublish(EXCHANGE_NAME, routingKey, null, message.getBytes("UTF-8"));
-            System.out.println(" [x] Sent '" + routingKey + "':'" + message + "'");
+    public static void main(String[] argv) {
+        try (Send fibonacciRpc = new Send()) {
+            for (int i = 0; i < 32; i++) {
+                String i_str = Integer.toString(i);
+                System.out.println(" [x] Requesting fib(" + i_str + ")");
+                String response = fibonacciRpc.call(i_str);
+                System.out.println(" [.] Got '" + response + "'");
+            }
+        } catch (IOException | TimeoutException | InterruptedException | ExecutionException e) {
+            e.printStackTrace();
         }
     }
 
-    public static String getRouting(String[] argv) {
-        return argv[0];
+    public String call(String message) throws IOException, InterruptedException, ExecutionException {
+        final String corrId = UUID.randomUUID().toString();
+
+        String replyQueueName = channel.queueDeclare().getQueue();
+        AMQP.BasicProperties props = new AMQP.BasicProperties
+                .Builder()
+                .correlationId(corrId)
+                .replyTo(replyQueueName)
+                .build();
+
+        channel.basicPublish("", requestQueueName, props, message.getBytes("UTF-8"));
+
+        final CompletableFuture<String> response = new CompletableFuture<>();
+
+        String ctag = channel.basicConsume(replyQueueName, true, (consumerTag, delivery) -> {
+            if (delivery.getProperties().getCorrelationId().equals(corrId)) {
+                response.complete(new String(delivery.getBody(), "UTF-8"));
+            }
+        }, consumerTag -> {
+        });
+
+        String result = response.get();
+        channel.basicCancel(ctag);
+        return result;
     }
-    public static String getMessage(String[] argv) {
-        return argv[1];
+
+    public void close() throws IOException {
+        connection.close();
     }
-    //..
 }

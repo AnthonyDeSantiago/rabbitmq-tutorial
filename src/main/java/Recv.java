@@ -1,37 +1,49 @@
-import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.Connection;
-import com.rabbitmq.client.ConnectionFactory;
-import com.rabbitmq.client.DeliverCallback;
+import com.rabbitmq.client.*;
 
 public class Recv {
 
-    private static final String EXCHANGE_NAME = "topic_logs";
+    private static final String RPC_QUEUE_NAME = "rpc_queue";
+
+    private static int fib(int n) {
+        if (n == 0) return 0;
+        if (n == 1) return 1;
+        return fib(n - 1) + fib(n - 2);
+    }
 
     public static void main(String[] argv) throws Exception {
         ConnectionFactory factory = new ConnectionFactory();
         factory.setHost("localhost");
+
         Connection connection = factory.newConnection();
         Channel channel = connection.createChannel();
+        channel.queueDeclare(RPC_QUEUE_NAME, false, false, false, null);
+        channel.queuePurge(RPC_QUEUE_NAME);
 
-        channel.exchangeDeclare(EXCHANGE_NAME, "topic");
-        String queueName = channel.queueDeclare().getQueue();
+        channel.basicQos(1);
 
-        if (argv.length < 1) {
-            System.err.println("Usage: ReceiveLogsTopic [binding_key]...");
-            System.exit(1);
-        }
-
-        for (String bindingKey : argv) {
-            channel.queueBind(queueName, EXCHANGE_NAME, bindingKey);
-        }
-
-        System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+        System.out.println(" [x] Awaiting RPC requests");
 
         DeliverCallback deliverCallback = (consumerTag, delivery) -> {
-            String message = new String(delivery.getBody(), "UTF-8");
-            System.out.println(" [x] Received '" +
-                    delivery.getEnvelope().getRoutingKey() + "':'" + message + "'");
+            AMQP.BasicProperties replyProps = new AMQP.BasicProperties
+                    .Builder()
+                    .correlationId(delivery.getProperties().getCorrelationId())
+                    .build();
+
+            String response = "";
+            try {
+                String message = new String(delivery.getBody(), "UTF-8");
+                int n = Integer.parseInt(message);
+
+                System.out.println(" [.] fib(" + message + ")");
+                response += fib(n);
+            } catch (RuntimeException e) {
+                System.out.println(" [.] " + e);
+            } finally {
+                channel.basicPublish("", delivery.getProperties().getReplyTo(), replyProps, response.getBytes("UTF-8"));
+                channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+            }
         };
-        channel.basicConsume(queueName, true, deliverCallback, consumerTag -> { });
+
+        channel.basicConsume(RPC_QUEUE_NAME, false, deliverCallback, (consumerTag -> {}));
     }
 }
