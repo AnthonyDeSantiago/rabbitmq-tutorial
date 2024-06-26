@@ -1,66 +1,137 @@
-import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.ConfirmCallback;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
 
-import java.io.IOException;
+import java.time.Duration;
 import java.util.UUID;
-import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentNavigableMap;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.function.BooleanSupplier;
 
-public class Send implements AutoCloseable {
+public class Send {
 
-    private Connection connection;
-    private Channel channel;
-    private String requestQueueName = "rpc_queue";
+    static final int MESSAGE_COUNT = 50_000;
 
-    public Send() throws IOException, TimeoutException {
-        ConnectionFactory factory = new ConnectionFactory();
-        factory.setHost("localhost");
-
-        connection = factory.newConnection();
-        channel = connection.createChannel();
+    static Connection createConnection() throws Exception {
+        ConnectionFactory cf = new ConnectionFactory();
+        cf.setHost("localhost");
+        cf.setUsername("guest");
+        cf.setPassword("guest");
+        return cf.newConnection();
     }
 
-    public static void main(String[] argv) {
-        try (Send fibonacciRpc = new Send()) {
-            for (int i = 0; i < 32; i++) {
-                String i_str = Integer.toString(i);
-                System.out.println(" [x] Requesting fib(" + i_str + ")");
-                String response = fibonacciRpc.call(i_str);
-                System.out.println(" [.] Got '" + response + "'");
+    public static void main(String[] args) throws Exception {
+        publishMessagesIndividually();
+        publishMessagesInBatch();
+        handlePublishConfirmsAsynchronously();
+    }
+
+    static void publishMessagesIndividually() throws Exception {
+        try (Connection connection = createConnection()) {
+            Channel ch = connection.createChannel();
+
+            String queue = UUID.randomUUID().toString();
+            ch.queueDeclare(queue, false, false, true, null);
+
+            ch.confirmSelect();
+            long start = System.nanoTime();
+            for (int i = 0; i < MESSAGE_COUNT; i++) {
+                String body = String.valueOf(i);
+                ch.basicPublish("", queue, null, body.getBytes());
+                ch.waitForConfirmsOrDie(5_000);
             }
-        } catch (IOException | TimeoutException | InterruptedException | ExecutionException e) {
-            e.printStackTrace();
+            long end = System.nanoTime();
+            System.out.format("Published %,d messages individually in %,d ms%n", MESSAGE_COUNT, Duration.ofNanos(end - start).toMillis());
         }
     }
 
-    public String call(String message) throws IOException, InterruptedException, ExecutionException {
-        final String corrId = UUID.randomUUID().toString();
+    static void publishMessagesInBatch() throws Exception {
+        try (Connection connection = createConnection()) {
+            Channel ch = connection.createChannel();
 
-        String replyQueueName = channel.queueDeclare().getQueue();
-        AMQP.BasicProperties props = new AMQP.BasicProperties
-                .Builder()
-                .correlationId(corrId)
-                .replyTo(replyQueueName)
-                .build();
+            String queue = UUID.randomUUID().toString();
+            ch.queueDeclare(queue, false, false, true, null);
 
-        channel.basicPublish("", requestQueueName, props, message.getBytes("UTF-8"));
+            ch.confirmSelect();
 
-        final CompletableFuture<String> response = new CompletableFuture<>();
+            int batchSize = 100;
+            int outstandingMessageCount = 0;
 
-        String ctag = channel.basicConsume(replyQueueName, true, (consumerTag, delivery) -> {
-            if (delivery.getProperties().getCorrelationId().equals(corrId)) {
-                response.complete(new String(delivery.getBody(), "UTF-8"));
+            long start = System.nanoTime();
+            for (int i = 0; i < MESSAGE_COUNT; i++) {
+                String body = String.valueOf(i);
+                ch.basicPublish("", queue, null, body.getBytes());
+                outstandingMessageCount++;
+
+                if (outstandingMessageCount == batchSize) {
+                    ch.waitForConfirmsOrDie(5_000);
+                    outstandingMessageCount = 0;
+                }
             }
-        }, consumerTag -> {
-        });
 
-        String result = response.get();
-        channel.basicCancel(ctag);
-        return result;
+            if (outstandingMessageCount > 0) {
+                ch.waitForConfirmsOrDie(5_000);
+            }
+            long end = System.nanoTime();
+            System.out.format("Published %,d messages in batch in %,d ms%n", MESSAGE_COUNT, Duration.ofNanos(end - start).toMillis());
+        }
     }
 
-    public void close() throws IOException {
-        connection.close();
+    static void handlePublishConfirmsAsynchronously() throws Exception {
+        try (Connection connection = createConnection()) {
+            Channel ch = connection.createChannel();
+
+            String queue = UUID.randomUUID().toString();
+            ch.queueDeclare(queue, false, false, true, null);
+
+            ch.confirmSelect();
+
+            ConcurrentNavigableMap<Long, String> outstandingConfirms = new ConcurrentSkipListMap<>();
+
+            ConfirmCallback cleanOutstandingConfirms = (sequenceNumber, multiple) -> {
+                if (multiple) {
+                    ConcurrentNavigableMap<Long, String> confirmed = outstandingConfirms.headMap(
+                            sequenceNumber, true
+                    );
+                    confirmed.clear();
+                } else {
+                    outstandingConfirms.remove(sequenceNumber);
+                }
+            };
+
+            ch.addConfirmListener(cleanOutstandingConfirms, (sequenceNumber, multiple) -> {
+                String body = outstandingConfirms.get(sequenceNumber);
+                System.err.format(
+                        "Message with body %s has been nack-ed. Sequence number: %d, multiple: %b%n",
+                        body, sequenceNumber, multiple
+                );
+                cleanOutstandingConfirms.handle(sequenceNumber, multiple);
+            });
+
+            long start = System.nanoTime();
+            for (int i = 0; i < MESSAGE_COUNT; i++) {
+                String body = String.valueOf(i);
+                outstandingConfirms.put(ch.getNextPublishSeqNo(), body);
+                ch.basicPublish("", queue, null, body.getBytes());
+            }
+
+            if (!waitUntil(Duration.ofSeconds(60), () -> outstandingConfirms.isEmpty())) {
+                throw new IllegalStateException("All messages could not be confirmed in 60 seconds");
+            }
+
+            long end = System.nanoTime();
+            System.out.format("Published %,d messages and handled confirms asynchronously in %,d ms%n", MESSAGE_COUNT, Duration.ofNanos(end - start).toMillis());
+        }
     }
+
+    static boolean waitUntil(Duration timeout, BooleanSupplier condition) throws InterruptedException {
+        int waited = 0;
+        while (!condition.getAsBoolean() && waited < timeout.toMillis()) {
+            Thread.sleep(100L);
+            waited += 100;
+        }
+        return condition.getAsBoolean();
+    }
+
 }
