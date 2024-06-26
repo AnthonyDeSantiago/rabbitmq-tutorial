@@ -4,24 +4,25 @@ import com.rabbitmq.client.ConnectionFactory;
 
 public class Send {
 
-    private static final String EXCHANGE_NAME = "direct_logs";
+    private static final String EXCHANGE_NAME = "topic_logs";
 
     public static void main(String[] argv) throws Exception {
         ConnectionFactory factory = new ConnectionFactory();
         factory.setHost("localhost");
         try (Connection connection = factory.newConnection();
              Channel channel = connection.createChannel()) {
-            channel.exchangeDeclare(EXCHANGE_NAME, "direct");
 
-            String severity = getSeverity(argv);
+            channel.exchangeDeclare(EXCHANGE_NAME, "topic");
+
+            String routingKey = getRouting(argv);
             String message = getMessage(argv);
 
-            channel.basicPublish(EXCHANGE_NAME, severity, null, message.getBytes("UTF-8"));
-            System.out.println(" [x] Sent '" + severity + "':'" + message + "'");
+            channel.basicPublish(EXCHANGE_NAME, routingKey, null, message.getBytes("UTF-8"));
+            System.out.println(" [x] Sent '" + routingKey + "':'" + message + "'");
         }
     }
 
-    public static String getSeverity(String[] argv) {
+    public static String getRouting(String[] argv) {
         return argv[0];
     }
     public static String getMessage(String[] argv) {
