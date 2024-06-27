@@ -54,7 +54,16 @@ public class ourApp {
             }
 
             System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+            do {
+                if (!receive(channel, queueName)) {
+                    System.out.println("it broke :(");
+                }
+            } while (true);
 
+        }
+    }
+    private static boolean receive(Channel channel, String queueName) {
+        try {
             DeliverCallback deliverCallback = (consumerTag, delivery) -> {
                 String message = new String(delivery.getBody(), "UTF-8");
                 System.out.println(" [x] Received '" +
@@ -62,9 +71,14 @@ public class ourApp {
             };
             channel.basicConsume(queueName, true, deliverCallback, consumerTag -> {
             });
+            userInput = scanner.nextLine();
+            channel.queueUnbind(queueName, EXCHANGE_NAME, );
+            channel.queueBind(queueName, EXCHANGE_NAME, userInput);
+        } catch (Exception e) {
+            return false;
         }
+        return true;
     }
-
     public static String getRouting(String[] argv) {
         return argv[1];
     }
