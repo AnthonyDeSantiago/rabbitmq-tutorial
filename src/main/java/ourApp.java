@@ -48,21 +48,23 @@ public class ourApp {
                 System.err.println("Usage: ReceiveLogsTopic [binding_key]...");
                 System.exit(1);
             }
-
+            String somekey = "";
             for (String bindingKey : argv) {
                 channel.queueBind(queueName, EXCHANGE_NAME, bindingKey);
+                somekey = bindingKey;
             }
+
 
             System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
             do {
-                if (!receive(channel, queueName)) {
+                if (!receive(channel, queueName, somekey)) {
                     System.out.println("it broke :(");
                 }
             } while (true);
 
         }
     }
-    private static boolean receive(Channel channel, String queueName) {
+    private static boolean receive(Channel channel, String queueName, String bindingKey) {
         try {
             DeliverCallback deliverCallback = (consumerTag, delivery) -> {
                 String message = new String(delivery.getBody(), "UTF-8");
@@ -71,9 +73,16 @@ public class ourApp {
             };
             channel.basicConsume(queueName, true, deliverCallback, consumerTag -> {
             });
-            userInput = scanner.nextLine();
-            channel.queueUnbind(queueName, EXCHANGE_NAME, );
-            channel.queueBind(queueName, EXCHANGE_NAME, userInput);
+
+
+            if (scanner.hasNextLine()) {
+                userInput = scanner.nextLine();
+                channel.queueUnbind(queueName, EXCHANGE_NAME, bindingKey);
+                channel.queueBind(queueName, EXCHANGE_NAME, userInput);
+                bindingKey = userInput;
+            }
+
+
         } catch (Exception e) {
             return false;
         }
